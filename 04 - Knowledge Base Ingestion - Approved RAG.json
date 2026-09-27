@@ -1,0 +1,361 @@
+{
+  "name": "04 - Knowledge Base Ingestion - Approved RAG",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1760,
+        560
+      ],
+      "id": "52d4e4d5-625b-415a-afbf-f77fab66f020",
+      "name": "Manual Bulk Ingestion"
+    },
+    {
+      "parameters": {
+        "resource": "fileFolder",
+        "searchMethod": "query",
+        "queryString": "='1BgWYapD1rWz5tjm5Sr1JuT_YVTdeRTVd' in parents and trashed = false",
+        "returnAll": true,
+        "filter": {
+          "whatToSearch": "files"
+        },
+        "options": {
+          "fields": [
+            "id",
+            "name",
+            "mimeType",
+            "webViewLink"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -1552,
+        560
+      ],
+      "id": "f9076bcf-83a1-44ce-8c20-4ccb73a6449b",
+      "name": "Search Approved KB Files",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Ng1MHEvvqmnSzGfJ",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "1BgWYapD1rWz5tjm5Sr1JuT_YVTdeRTVd",
+          "mode": "list",
+          "cachedResultName": "FLOWMATE KNOWLEDGE BASE",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1BgWYapD1rWz5tjm5Sr1JuT_YVTdeRTVd"
+        },
+        "event": "fileUpdated",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1760,
+        816
+      ],
+      "id": "7cc5d848-754e-49fd-b9cd-ccfd24968214",
+      "name": "Trigger Approved KB Update",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Ng1MHEvvqmnSzGfJ",
+          "name": "Google Drive account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const allowedFiles = new Set([\n  \"01_Master_Knowledge_Base.md\",\n  \"02_Public_Information.md\",\n  \"06_FAQ_Database.csv\",\n]);\n\nreturn $input.all().filter(item => allowedFiles.has((item.json.name || \"\").trim()));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1312,
+        688
+      ],
+      "id": "fcdcd75d-541e-4c16-92f8-c0f7a9a4c8a7",
+      "name": "Allowlist Approved RAG Files"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH deleted AS (DELETE FROM flowmate_knowledge WHERE metadata->>'document_id' = $1 RETURNING 1) SELECT $1::text AS id;",
+        "options": {
+          "queryReplacement": "={{ $json.id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -1088,
+        688
+      ],
+      "id": "6becc444-06ae-4470-b051-b0fdf3d5660d",
+      "name": "Delete Existing Document Chunks",
+      "credentials": {
+        "postgres": {
+          "id": "cYI4i5pMQQZgKNSK",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -864,
+        688
+      ],
+      "id": "b5a2389a-e2da-434e-a263-5ff7db0f689d",
+      "name": "Download Approved KB File",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "Ng1MHEvvqmnSzGfJ",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\nconst items = $input.all();\nconst CHUNK_SIZE = 1400;\nconst OVERLAP = 180;\n\nfunction sanitize(text) {\n  let t = text || \"\";\n  t = t.replace(/\\0/g, \"\");\n  t = t.replace(/\\\\u(?![0-9a-fA-F]{4})/g, \"\\\\\\\\u\");\n  t = t.replace(/\\r\\n/g, \"\\n\");\n  t = t.replace(/\\n{4,}/g, \"\\n\\n\\n\");\n  return t.trim();\n}\n\nfunction splitIntoChunks(text) {\n  const paragraphs = text.split(/\\n{2,}/).map(p => p.trim()).filter(Boolean);\n  const chunks = [];\n  let current = \"\";\n\n  for (const p of paragraphs) {\n    if (!current) { current = p; continue; }\n\n    if ((current + \"\\n\\n\" + p).length <= CHUNK_SIZE) {\n      current += \"\\n\\n\" + p;\n      continue;\n    }\n\n    chunks.push(current.trim());\n    const tail = current.slice(Math.max(0, current.length - OVERLAP));\n    current = (tail + \"\\n\\n\" + p).trim();\n\n    while (current.length > CHUNK_SIZE) {\n      chunks.push(current.slice(0, CHUNK_SIZE).trim());\n      current = current.slice(Math.max(1, CHUNK_SIZE - OVERLAP)).trim();\n    }\n  }\n\n  if (current.trim()) chunks.push(current.trim());\n  return chunks.filter(c => c.length >= 20);\n}\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const docData = item.json || {};\n  let rawText = \"\";\n\n  if (item.binary && Object.keys(item.binary).length) {\n    const binaryKey = Object.keys(item.binary)[0];\n    const buffer = await this.helpers.getBinaryDataBuffer(i, binaryKey);\n    rawText = buffer.toString(\"utf8\");\n  } else {\n    rawText = docData.content || docData.text || docData.data || \"\";\n  }\n\n  const cleanedText = sanitize(rawText);\n  if (!cleanedText || cleanedText.length < 20) continue;\n\n  const binaryMeta = item.binary ? Object.values(item.binary)[0] : null;\n  const fileName = docData.name || binaryMeta?.fileName || \"unknown\";\n  const documentId = docData.id || docData.fileId || binaryMeta?.id || \"\";\n\n  const chunks = splitIntoChunks(cleanedText);\n\n  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {\n    results.push({\n      json: {\n        text: chunks[chunkIndex],\n        metadata: {\n          document_id: documentId,\n          document_name: fileName,\n          chunk_index: chunkIndex,\n          chunk_count: chunks.length,\n          classification: \"stable_rag\",\n          approval_status: \"approved\",\n          source: \"Google Drive\",\n          source_folder: \"FLOWMATE KNOWLEDGE BASE\"\n        }\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        688
+      ],
+      "id": "ee602a75-cb14-4e04-93db-c208409d3f76",
+      "name": "Clean Chunk & Prepare Metadata"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-ws-H.IYPREY.x0L7.MEQCIFkQrU-1eQCKWXHcLwwMQ1-GJ1beMv-lCjTtkdYV9vdbAiAtMAFHLCtLLaXF_iaIIHZW3AmsnBQmST36Z3-BO_f7SQ"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-v4"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -384,
+        608
+      ],
+      "id": "4005a6a7-4381-46f8-bd56-47f84307a62f",
+      "name": "Create DashScope Embedding"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -128,
+        688
+      ],
+      "id": "ea42c746-0373-4196-8fb2-0f17700ce546",
+      "name": "Merge Chunk With Embedding"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO flowmate_knowledge\n(content, metadata, embedding)\nVALUES (\n$$ {{ $json.text.replace(/\\$\\$/g, '$ $') }} $$,\n'{{ JSON.stringify($json.metadata).replace(/'/g, \"''\") }}'::jsonb,\n'{{ JSON.stringify($json.data[0].embedding) }}'::vector\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        128,
+        688
+      ],
+      "id": "2cd3ffc2-8cdc-474f-8db1-69793bb9931f",
+      "name": "Insert Approved Chunk Into Supabase",
+      "credentials": {
+        "postgres": {
+          "id": "cYI4i5pMQQZgKNSK",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Bulk Ingestion": {
+      "main": [
+        [
+          {
+            "node": "Search Approved KB Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Approved KB Files": {
+      "main": [
+        [
+          {
+            "node": "Allowlist Approved RAG Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Approved KB Update": {
+      "main": [
+        [
+          {
+            "node": "Allowlist Approved RAG Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Allowlist Approved RAG Files": {
+      "main": [
+        [
+          {
+            "node": "Delete Existing Document Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Existing Document Chunks": {
+      "main": [
+        [
+          {
+            "node": "Download Approved KB File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Approved KB File": {
+      "main": [
+        [
+          {
+            "node": "Clean Chunk & Prepare Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Chunk & Prepare Metadata": {
+      "main": [
+        [
+          {
+            "node": "Create DashScope Embedding",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Chunk With Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create DashScope Embedding": {
+      "main": [
+        [
+          {
+            "node": "Merge Chunk With Embedding",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Chunk With Embedding": {
+      "main": [
+        [
+          {
+            "node": "Insert Approved Chunk Into Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "a9a41369-c774-4672-86f9-7b1f75c15a83",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b74db8ccf83aa7363bfaf4515b00d3f530f973c7ecee12b81e73eca2e3536285"
+  },
+  "nodeGroups": [],
+  "id": "9eFW1RfuGWf9gb6F",
+  "tags": []
+}
